@@ -21,8 +21,8 @@ print("All imports successful!")
 
 # %%
 # --- Configuration ---
-# GPU settings
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+# Force CPU usage for quantized model
+print("🖥️  Configured to use CPU for quantized processing")
 
 # Data paths
 # Ensure these paths are correct for your system
@@ -44,12 +44,10 @@ i0 = 1
 warnings.filterwarnings('ignore')
 
 # --- Initialize device info for logging ---
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-if torch.cuda.is_available():
-    print("CUDA is available")
-    print(f"Available GPUs: {torch.cuda.device_count()}")
-else:
-    print("CUDA not available, using CPU")
+device = torch.device("cpu")
+print(f"🖥️  Using device: {device}")
+print(f"🔧 CPU cores available: {torch.get_num_threads()}")
+print(f"💾 System RAM will be used for model and data")
 
 # --- Load datasets ---
 try:
@@ -152,9 +150,7 @@ class AuroraNormalizedDataCapture:
             batch = model.batch_transform_hook(batch)
 
             # 2. Move batch to model's device and dtype
-            # Use `model._model_dtype` if available, otherwise infer from parameters
-            p_dtype = getattr(model, '_model_dtype', next(model.parameters()).dtype)
-            batch = batch.to(device=model.device)  # FIXED: Removed dtype parameter
+            batch = batch.to(device=model.device)
 
             # CAPTURE POINT 1: After batch.normalise() - THE KEY NORMALIZED INPUTS!
             # Ensure model has surf_stats and atmos_stats for normalization
@@ -411,7 +407,6 @@ class AuroraNormalizedDataCapture:
         # Important: hooks should always return the output_tensor unchanged
         return output_tensor
 
-
     def _capture_pre_unnormalize(self, pred_batch: Batch):
         """Captures predictions BEFORE `unnormalise()` - still in normalized space."""
         print(f"     Capturing predictions before unnormalise() (step {self.step_count}).")
@@ -459,7 +454,6 @@ class AuroraNormalizedDataCapture:
             if self.save_tensors:
                 # Save just one time step (T=0) and first level for easier inspection
                 self._save_tensor_data(tensor[0, 0, 0], f'pre_unnormalize_atm_{var_name}_lvl0_step_{self.step_count}')
-
 
     def _save_tensor_data(self, tensor: torch.Tensor, filename_suffix: str):
         """Saves a PyTorch tensor's data to a .npy file."""
@@ -536,7 +530,6 @@ class AuroraNormalizedDataCapture:
         else:
             print(f"\nVALIDATION FAILED: Review the logs above for specific issues.")
         return overall_success
-
 
     def analyze_captured_data(self):
         """
@@ -637,63 +630,53 @@ try:
         raise IndexError(f"i0 ({i0}) is out of bounds for surf_vars_ds.valid_time ({len(surf_vars_ds['valid_time'])}). Adjust i0 to be at least 1 and less than total timesteps.")
 
     print(f"Surface variable shape (t2m) for indices [{i0-1}, {i0}]: {surf_vars_ds['t2m'].values[[i0 - 1, i0]].shape}")
-    print(f"Atmospheric variable shape (t) for indices [{i0-1}, {i0}]: (2, 13, 721, 1440)")
+    print(f"Atmospheric variable shape (t) for indices [{i0-1}, {i0}]: {atmos_vars_ds['t'].values[[i0 - 1, i0]].shape}")
     print(f"Static variable shape (z): {static_vars_ds['z'].values.shape}") # Static vars typically don't have a time dim
+    
+    # Show original full resolution
+    print(f"\nORIGINAL FULL RESOLUTION DATA:")
+    print(f"   Surface data spatial shape: {surf_vars_ds['t2m'].shape[-2:]}")
+    print(f"   Atmospheric data spatial shape: {atmos_vars_ds['t'].shape[-2:]}")
+    print(f"   Static data spatial shape: {static_vars_ds['z'].shape[-2:]}")
+    
 except Exception as e:
     print(f"ERROR: Data shape check failed. Make sure data variables and indices are correct. {e}")
     exit()
 
-# MEMORY OPTIMIZATION: Downsample data to reduce GPU memory usage
-downsample_factor = 4
-
-# Downsample indices
-lat_indices = slice(None, None, downsample_factor)
-lon_indices = slice(None, None, downsample_factor)
-
-print(f"\n=== MEMORY OPTIMIZATION ===")
-print(f"Downsampling by factor {downsample_factor}")
-# Example of expected downsampled shape (e.g., from (721, 1440) to approx (181, 360))
-try:
-    sample_downsampled_shape = surf_vars_ds['t2m'].values[0, lat_indices, lon_indices].shape
-    print(f"Original 2D resolution: {surf_vars_ds['t2m'].shape[-2:]} -> Downsampled 2D resolution: {sample_downsampled_shape}")
-except Exception as e:
-    print(f"WARNING: Could not determine sample downsampled shape. Ensure lat/lon dimensions are correct. {e}")
-
-
-# Create batch with downsampled data using i0 for the initial state
+# Create batch with original full-resolution data using i0 for the initial state
 # Note: Aurora expects (B, T, H, W) or (B, T, L, H, W) where T is history length + 1 (usually 2)
 # The `[i0 - 1, i0]` selects two time steps for history.
 try:
     batch = Batch(
         surf_vars={
-            "2t": torch.from_numpy(surf_vars_ds["t2m"].values[[i0 - 1, i0]][:, lat_indices, lon_indices][None]), # Add batch dim [None]
-            "10u": torch.from_numpy(surf_vars_ds["u10"].values[[i0 - 1, i0]][:, lat_indices, lon_indices][None]),
-            "10v": torch.from_numpy(surf_vars_ds["v10"].values[[i0 - 1, i0]][:, lat_indices, lon_indices][None]),
-            "msl": torch.from_numpy(surf_vars_ds["msl"].values[[i0 - 1, i0]][:, lat_indices, lon_indices][None]),
+            "2t": torch.from_numpy(surf_vars_ds["t2m"].values[[i0 - 1, i0]][None]), # Add batch dim [None]
+            "10u": torch.from_numpy(surf_vars_ds["u10"].values[[i0 - 1, i0]][None]),
+            "10v": torch.from_numpy(surf_vars_ds["v10"].values[[i0 - 1, i0]][None]),
+            "msl": torch.from_numpy(surf_vars_ds["msl"].values[[i0 - 1, i0]][None]),
         },
         static_vars={
             # Static vars are 2D (lat, lon) in the original dataset, usually no time dim
-            "z": torch.from_numpy(static_vars_ds["z"].values[0, lat_indices, lon_indices]), # Take first (and likely only) time dim
-            "slt": torch.from_numpy(static_vars_ds["slt"].values[0, lat_indices, lon_indices]),
-            "lsm": torch.from_numpy(static_vars_ds["lsm"].values[0, lat_indices, lon_indices]),
+            "z": torch.from_numpy(static_vars_ds["z"].values[0]), # Take first (and likely only) time dim
+            "slt": torch.from_numpy(static_vars_ds["slt"].values[0]),
+            "lsm": torch.from_numpy(static_vars_ds["lsm"].values[0]),
         },
         atmos_vars={
-            "t": torch.from_numpy(atmos_vars_ds["t"].values[[i0 - 1, i0]][:, :, lat_indices, lon_indices][None]), # Add batch dim [None]
-            "u": torch.from_numpy(atmos_vars_ds["u"].values[[i0 - 1, i0]][:, :, lat_indices, lon_indices][None]),
-            "v": torch.from_numpy(atmos_vars_ds["v"].values[[i0 - 1, i0]][:, :, lat_indices, lon_indices][None]),
-            "q": torch.from_numpy(atmos_vars_ds["q"].values[[i0 - 1, i0]][:, :, lat_indices, lon_indices][None]),
-            "z": torch.from_numpy(atmos_vars_ds["z"].values[[i0 - 1, i0]][:, :, lat_indices, lon_indices][None]),
+            "t": torch.from_numpy(atmos_vars_ds["t"].values[[i0 - 1, i0]][None]), # Add batch dim [None]
+            "u": torch.from_numpy(atmos_vars_ds["u"].values[[i0 - 1, i0]][None]),
+            "v": torch.from_numpy(atmos_vars_ds["v"].values[[i0 - 1, i0]][None]),
+            "q": torch.from_numpy(atmos_vars_ds["q"].values[[i0 - 1, i0]][None]),
+            "z": torch.from_numpy(atmos_vars_ds["z"].values[[i0 - 1, i0]][None]),
         },
         metadata=Metadata(
-            lat=torch.from_numpy(surf_vars_ds.latitude.values[lat_indices]),
-            lon=torch.from_numpy(surf_vars_ds.longitude.values[lon_indices]),
+            lat=torch.from_numpy(surf_vars_ds.latitude.values),
+            lon=torch.from_numpy(surf_vars_ds.longitude.values),
             # Select the valid_time corresponding to i0 (the current time step for prediction)
             time=(surf_vars_ds.valid_time.values.astype("datetime64[s]").tolist()[i0],),
             atmos_levels=tuple(int(level) for level in atmos_vars_ds.pressure_level.values),
         ),
-    ).to(device=device)  # FIXED: Removed dtype parameter
+    ).to(device=device)
 
-    print("Batch prepared successfully with real data and moved to device!")
+    print("Batch prepared successfully with original full-resolution data and moved to device!")
     # Debug: Check final tensor shapes
     print("\n=== BATCH TENSOR SHAPES (AFTER CREATION AND DEVICE TRANSFER) ===")
     for name, tensor in batch.surf_vars.items():
@@ -716,8 +699,8 @@ print("\n" + "="*80)
 print("LOADING AURORA MODEL WITH QUANTIZATION")
 print("="*80)
 
-# Clear any existing model from memory to avoid conflicts and free GPU RAM
-print("=== CLEARING GPU MEMORY ===")
+# Clear any existing model from memory to avoid conflicts and free RAM
+print("=== CLEARING MEMORY ===")
 if 'model' in globals():
     del model
 if 'quantized_model' in globals():
@@ -725,14 +708,8 @@ if 'quantized_model' in globals():
 if 'base_model' in globals():
     del base_model
 
-# Force Python's garbage collection and clear PyTorch's CUDA cache
+# Force Python's garbage collection
 gc.collect()
-torch.cuda.empty_cache()
-
-# Check current GPU memory usage after cleanup
-print("=== GPU MEMORY STATUS BEFORE LOADING MODEL ===")
-for i in range(torch.cuda.device_count()):
-    print(f"GPU {i}: {torch.cuda.memory_allocated(i)/1e9:.2f}GB allocated, {torch.cuda.memory_reserved(i)/1e9:.2f}GB reserved")
 
 print(f"\n=== LOADING MODEL WITH AGGRESSIVE DYNAMIC QUANTIZATION (qint8) ===")
 
@@ -756,12 +733,12 @@ try:
     del base_model
     gc.collect()
 
-    # Move the quantized model to the determined device (CPU or GPU)
+    # The quantized model stays on CPU (no need to move to device since device is CPU)
     model = quantized_model.to(device)
     model.eval() # Set to evaluation mode for inference
 
     print(f"Quantized model type: {type(model)}")
-    print(f"Model loaded and moved to {device}")
+    print(f"Model loaded and ready on {device}")
     # Verify that the model has the necessary statistics for normalization
     if not hasattr(model, 'surf_stats') or model.surf_stats is None:
         raise RuntimeError("Model is missing 'surf_stats'. Cannot perform normalization.")
@@ -777,7 +754,7 @@ except Exception as e:
 # %%
 # --- Normalized Data Capture Execution ---
 print("\n" + "#"*80)
-print("INITIATING NORMALIZED DATA CAPTURE WITH REAL DATA")
+print("INITIATING NORMALIZED DATA CAPTURE WITH FULL-RESOLUTION REAL DATA")
 print("#"*80)
 
 # Instantiate and setup the data capture system
@@ -788,7 +765,7 @@ data_capture.setup_aurora_hooks(model)
 # This will trigger all the capture hooks.
 # We are intentionally *not* calling rollout here to focus on the initial forward pass
 # where batch.normalise() happens for the input.
-print("\nRunning a single forward pass through the model with real data to trigger data capture...")
+print("\nRunning a single forward pass through the quantized model with full-resolution real data to trigger data capture...")
 with torch.no_grad(): # Inference mode, disable gradient computation for efficiency
     # Pass your real data batch to the hooked model.
     # The custom model.forward will now execute and capture intermediate data.
@@ -803,11 +780,12 @@ data_capture.analyze_captured_data()
 data_capture.cleanup_hooks(model)
 
 print("\n" + "#"*80)
-print("NORMALIZED DATA CAPTURE DEMONSTRATION WITH REAL DATA COMPLETE.")
+print("NORMALIZED DATA CAPTURE DEMONSTRATION WITH FULL-RESOLUTION REAL DATA COMPLETE.")
 print(f"Check the logs above for statistical summaries and the '{output_capture_path.name}' directory for .npy files.")
 print("To analyze the quantization effect, compare the stats and distributions of:")
 print("  1. 'NORMALIZED INPUTS' (should be mean~0, std~1)")
 print("  2. 'PRE-UNNORMALIZE PREDICTIONS' (should also be mean~0, std~1 if model predicts well)")
+print("  3. Full-resolution data has been processed without downsampling")
 print("#"*80)
 
 # %%
